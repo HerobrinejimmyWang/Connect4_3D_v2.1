@@ -1,0 +1,13 @@
+=== Training Final Report ===
+Total Iterations: 40
+Self-Play Games per Iter: 100
+Model trained successfully.
+Check 'eval_log.txt' for progress history.
+
+=== Evaluation Summary ===
+Number of Evaluations: 8
+Average Win Rate (vs Random): 0.988
+Best Win Rate: 1.000 at Iter 10 (W/D/L = 10/0/0)
+Last Eval (Iter 40): Wins 10, Losses 0, Draws 0
+
+Final model file not found. Checkpoints available in the checkpoint directory.

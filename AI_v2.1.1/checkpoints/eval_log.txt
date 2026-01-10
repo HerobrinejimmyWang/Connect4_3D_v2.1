@@ -1,0 +1,8 @@
+Iter 5: Wins 9/10, Losses 1, Draws 0
+Iter 10: Wins 10/10, Losses 0, Draws 0
+Iter 15: Wins 10/10, Losses 0, Draws 0
+Iter 20: Wins 10/10, Losses 0, Draws 0
+Iter 25: Wins 10/10, Losses 0, Draws 0
+Iter 30: Wins 10/10, Losses 0, Draws 0
+Iter 35: Wins 10/10, Losses 0, Draws 0
+Iter 40: Wins 10/10, Losses 0, Draws 0
