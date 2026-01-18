@@ -3,6 +3,7 @@ import sys
 import numpy as np
 import math
 import os
+import threading
 
 # Custom modules
 from game_ui_controls import *
@@ -48,14 +49,17 @@ class GameManager:
         self.prediction_enabled = False
         self.prediction_value = 0.5
         self.hint_pos = None
+        self.hint_thinking = False # 是否正在计算提示
 
     def load_model_by_idx(self, idx):
         if 0 <= idx < len(self.available_models):
-            path = self.available_models[idx]['path']
-            success = self.ai_interface.load_model(path)
+            model_info = self.available_models[idx]
+            path = model_info['path']
+            rank = model_info.get('rank', 99)
+            success = self.ai_interface.load_model(path, rank=rank)
             if success:
                 self.current_model_idx = idx
-                print(f"Loaded: {self.available_models[idx]['name']}")
+                print(f"Loaded: {model_info['name']} (Rank: {rank})")
                 return True
         return False
         
@@ -124,6 +128,7 @@ class GameManager:
         self.game_over = False
         self.winner = 0
         self.winning_line = []
+        self.hint_pos = None # Reset hint on undo
         
         # Reset player
         if self.history:
@@ -147,10 +152,21 @@ class GameManager:
         self.prediction_value = self.ai_interface.get_prediction(self.board, self.current_player)
 
     def get_hint(self):
-        if self.game_over: return
-        move = self.ai_interface.get_best_move(self.board, self.current_player)
-        if move:
-            self.hint_pos = move
+        if self.game_over or self.hint_thinking: return
+        
+        def run_hint():
+            self.hint_thinking = True
+            try:
+                board_copy = np.copy(self.board)
+                player = self.current_player
+                step_count = len(self.history)
+                move = self.ai_interface.get_best_move(board_copy, player, step_count=step_count)
+                if move and self.current_player == player:
+                    self.hint_pos = move
+            finally:
+                self.hint_thinking = False
+        
+        threading.Thread(target=run_hint, daemon=True).start()
 
     def check_win_at(self, layer, row, col):
         # Direction vectors (dz, dy, dx)
@@ -199,10 +215,24 @@ class Connect43DApp:
         self.clock = pygame.time.Clock()
         self.font_curr = pygame.font.SysFont("Consolas", 20)
         self.font_title = pygame.font.SysFont("Impact", 40)
+        self.font_small = pygame.font.SysFont("Consolas", 14)
+        
+        # Fonts for Chinese support
+        self.font_chi_curr = pygame.font.SysFont("Microsoft YaHei", 20)
+        self.font_chi_title = pygame.font.SysFont("Microsoft YaHei", 40, bold=True)
         
         self.gm = GameManager()
-        self.state = "MENU" # MENU, GAME
+        self.state = "MENU" # MENU, GAME, INSTRUCTION
+        self.instr_lang = "EN" # "EN" or "CN"
+        self.instr_scroll_y = 0 # Instruction scroll offset
         
+        # AI Threading
+        self.ai_thinking = False
+        self.ai_thread = None
+        
+        # Interaction
+        self.hovered_pos = None # (l, r, c)
+
         # UI Elements
         self.setup_ui()
         
@@ -224,24 +254,29 @@ class Connect43DApp:
         self.btn_pvp = Button(cx - 100, cy - 60, 200, 40, "Player vs Player", lambda: self.start_game('PVP'), self.font_curr)
         self.btn_pve_h = Button(cx - 100, cy, 200, 40, "PvAI (You Red)", lambda: self.start_game('PVE_HUMAN_RED'), self.font_curr)
         self.btn_pve_a = Button(cx - 100, cy + 60, 200, 40, "PvAI (AI Red)", lambda: self.start_game('PVE_AI_RED'), self.font_curr)
+        self.btn_instr = Button(cx - 100, cy + 120, 200, 40, "Instructions", self.show_instructions, self.font_curr)
         
-        self.btn_model = Button(cx - 150, cy + 120, 300, 40, "Model: Default", self.show_model_list, self.font_curr)
+        self.btn_model = Button(cx - 150, cy + 180, 300, 40, "Model: Default", self.show_model_list, self.font_curr)
         
         # Model List (Initially Hidden)
         items = self.gm.available_models
-        self.list_models = SelectionList(cx - 150, cy + 160, 300, 200, items, self.on_model_selected, self.font_curr)
+        self.list_models = SelectionList(cx - 150, cy + 220, 300, 200, items, self.on_model_selected, self.font_curr)
         
         self.update_model_btn_text()
         
+        # --- INSTRUCTION UI ---
+        self.btn_instr_back = Button(20, 20, 150, 40, "Back to Menu", self.to_menu, self.font_chi_curr, bg_color=(80, 20, 20))
+        self.btn_instr_lang = Button(WINDOW_WIDTH - 170, 20, 150, 40, "中文 / EN", self.toggle_instr_lang, self.font_chi_curr)
+
         # --- GAME UI ---
         # Right sidebar controls
         rx = WINDOW_WIDTH - 250
         
-        self.btn_view = Button(rx, 50, 200, 40, "Toggle 3D View", self.toggle_view, self.font_curr)
-        self.btn_hint = Button(rx, 110, 200, 40, "Get Hint", self.gm.get_hint, self.font_curr)
+        self.btn_view = Button(rx, 50, 200, 40, "Switch to 3D View", self.toggle_view, self.font_curr)
+        self.btn_hint = Button(rx, 110, 200, 40, "Get Hint (H)", self.gm.get_hint, self.font_curr)
         self.btn_undo = Button(rx, 170, 200, 40, "Undo (U)", self.gm.undo, self.font_curr)
         self.btn_restart = Button(rx, 230, 200, 40, "Restart (R)", self.gm.reset_game, self.font_curr)
-        self.btn_pred = Button(rx, 290, 200, 40, "Win Prediction", self.toggle_prediction, self.font_curr)
+        self.btn_pred = Button(rx, 290, 200, 40, "Prediction (P)", self.toggle_prediction, self.font_curr)
         self.btn_menu = Button(rx, WINDOW_HEIGHT - 60, 200, 40, "Back to Menu", self.to_menu, self.font_curr, bg_color=(80, 20, 20))
         
         self.input_coords = InputBox(rx, 400, 140, 40, self.font_curr, "L R C")
@@ -262,6 +297,14 @@ class Connect43DApp:
     def on_model_selected(self, idx):
         if self.gm.load_model_by_idx(idx):
             self.update_model_btn_text()
+
+    def show_instructions(self):
+        self.state = "INSTRUCTION"
+        self.instr_scroll_y = 0
+
+    def toggle_instr_lang(self):
+        self.instr_lang = "CN" if self.instr_lang == "EN" else "EN"
+        self.instr_scroll_y = 0
 
     def start_game(self, mode):
         self.gm.game_mode = mode
@@ -284,7 +327,21 @@ class Connect43DApp:
         if self.gm.prediction_enabled:
             self.gm.update_prediction()
 
+    def is_human_turn(self):
+        """Checks if it's currently a human's turn to move."""
+        if self.gm.game_over or self.ai_thinking:
+            return False
+        if self.gm.game_mode == 'PVP':
+            return True
+        if self.gm.game_mode == 'PVE_HUMAN_RED':
+            return self.gm.current_player == 1
+        if self.gm.game_mode == 'PVE_AI_RED':
+            return self.gm.current_player == 2
+        return False
+
     def process_coord_input(self):
+        if not self.is_human_turn(): return
+        
         vals = self.input_coords.get_values()
         if vals:
             # User input: 3 numbers. Prompt says "Length Width Height" -> "5x5x8".
@@ -318,14 +375,33 @@ class Connect43DApp:
                     if self.list_models.handle_event(event):
                          return # Consumed
                 
-                for btn in [self.btn_pvp, self.btn_pve_h, self.btn_pve_a, self.btn_model]:
+                for btn in [self.btn_pvp, self.btn_pve_h, self.btn_pve_a, self.btn_instr, self.btn_model]:
                     btn.handle_event(event)
+            
+            elif self.state == "INSTRUCTION":
+                for btn in [self.btn_instr_back, self.btn_instr_lang]:
+                    btn.handle_event(event)
+                
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    if event.button == 4: # Scroll Up
+                        self.instr_scroll_y = min(0, self.instr_scroll_y + 30)
+                    elif event.button == 5: # Scroll Down
+                        self.instr_scroll_y -= 30
                     
             elif self.state == "GAME":
+                # Hover tracking
+                if event.type == pygame.MOUSEMOTION:
+                    if not self.view_3d_active:
+                        self.hovered_pos = self.get_2d_pos(event.pos)
+                    else:
+                        self.hovered_pos = None
+
                 # Global Keys
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_r: self.gm.reset_game()
                     elif event.key == pygame.K_u: self.gm.undo()
+                    elif event.key == pygame.K_p: self.toggle_prediction()
+                    elif event.key == pygame.K_h: self.gm.get_hint()
                 
                 # UI Buttons
                 for btn in [self.btn_view, self.btn_hint, self.btn_undo, self.btn_restart, self.btn_pred, self.btn_menu, self.btn_input_go]:
@@ -357,50 +433,47 @@ class Connect43DApp:
                         if event.pos[0] < WINDOW_WIDTH - 250:
                             self.handle_2d_click(event.pos)
 
-    def handle_2d_click(self, pos):
-        if self.gm.game_over: return
-        
-        # Determine cell from pos
-        # Layout: 4 cols of 2 layers
+    def get_2d_pos(self, pos):
+        """Helper to map mouse pixel coordinates to (layer, row, col) in 2D view."""
+        # Layout match draw_board_2d
         CELL = 40
         GAP = 5
         GRP_GAP = 20
         MARGIN = 40
-        
-        mx, my = pos
-        
-        # It's tricky to map exactly without re-calculating the layout logic.
         layers_per_row = 4
-        
-        # Grid block width
         grid_w = BOARD_SIZE * (CELL + GAP)
         block_w = grid_w + GRP_GAP
         
+        mx, my = pos
+        # Sidebar check
+        if mx >= WINDOW_WIDTH - 250:
+            return None
+
         for l in range(MAX_LAYERS):
             row_idx = l // layers_per_row
             col_idx = l % layers_per_row
             
             start_x = MARGIN + col_idx * block_w
-            start_y = MARGIN + row_idx * (block_w + 30) # Height is roughly width
+            start_y = MARGIN + row_idx * (block_w + 30)
             
             if start_x <= mx < start_x + grid_w and start_y <= my < start_y + grid_w:
-                # Inside a grid
-                c = (mx - start_x) // (CELL + GAP)
-                r = (my - start_y) // (CELL + GAP)
-
-                # Ensure r, c are valid ints
-                r = int(r)
-                c = int(c)
-                
+                c = int((mx - start_x) // (CELL + GAP))
+                r = int((my - start_y) // (CELL + GAP))
                 if 0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE:
-                    self.gm.make_move(l, r, c)
-                return
+                    return (l, r, c)
+        return None
+
+    def handle_2d_click(self, pos):
+        if not self.is_human_turn(): return
+        p = self.get_2d_pos(pos)
+        if p:
+            self.gm.make_move(*p)
 
     def update(self):
         self.flash_timer += 1
         
         # AI Turn Logic
-        if self.state == "GAME" and not self.gm.game_over:
+        if self.state == "GAME" and not self.gm.game_over and not self.ai_thinking:
             is_ai_turn = False
             if self.gm.game_mode == 'PVE_HUMAN_RED':
                 if self.gm.current_player == 2: is_ai_turn = True
@@ -408,19 +481,37 @@ class Connect43DApp:
                 if self.gm.current_player == 1: is_ai_turn = True
                 
             if is_ai_turn:
-                # Add delay or thread this so UI doesn't freeze
-                # For simplicity, 1 frame blocking
-                # To prevent instant moves, check timer or something
-                move = self.gm.ai_interface.get_best_move(self.gm.board, self.gm.current_player)
-                if move:
-                    l, r, c = move
-                    self.gm.make_move(l, r, c)
+                self.ai_thinking = True
+                # 使用线程异步思考，避免界面卡死
+                self.ai_thread = threading.Thread(target=self.run_ai_thinking)
+                self.ai_thread.daemon = True
+                self.ai_thread.start()
+
+    def run_ai_thinking(self):
+        """AI 思考线程函数"""
+        try:
+            # 获取当前局面的拷贝，防止多线程竞态
+            board_copy = np.copy(self.gm.board)
+            player = self.gm.current_player
+            step_count = len(self.gm.history)
+            
+            # 传入当前总步数以辅助优化
+            move = self.gm.ai_interface.get_best_move(board_copy, player, step_count=step_count)
+            
+            # 执行前二次校验，确保还是同一个玩家的局势（防止思考中途用户点重置或撤销）
+            if move and self.gm.current_player == player and not self.gm.game_over:
+                l, r, c = move
+                self.gm.make_move(l, r, c)
+        finally:
+            self.ai_thinking = False
 
     def draw(self):
         self.screen.fill(COLOR_BG)
         
         if self.state == "MENU":
             self.draw_menu()
+        elif self.state == "INSTRUCTION":
+            self.draw_instruction()
         else:
             self.draw_game()
         
@@ -431,13 +522,157 @@ class Connect43DApp:
         t_surf = self.font_title.render("CONNECT 4 3D | AI EDITION", True, COLOR_PRIMARY)
         self.screen.blit(t_surf, (WINDOW_WIDTH//2 - t_surf.get_width()//2, 100))
         
-        for btn in [self.btn_pvp, self.btn_pve_h, self.btn_pve_a, self.btn_model]:
+        for btn in [self.btn_pvp, self.btn_pve_h, self.btn_pve_a, self.btn_instr, self.btn_model]:
             btn.draw(self.screen)
         
         # Draw list on top if visible
         self.list_models.draw(self.screen)
 
+    def draw_instruction(self):
+        # Background and Header
+        if self.instr_lang == "EN":
+            t_surf = self.font_title.render("INSTRUCTIONS", True, COLOR_PRIMARY)
+        else:
+            t_surf = self.font_chi_title.render("新手指南", True, COLOR_PRIMARY)
+        self.screen.blit(t_surf, (WINDOW_WIDTH//2 - t_surf.get_width()//2, 40))
+
+        # Content box
+        content_rect = pygame.Rect(50, 100, WINDOW_WIDTH - 100, WINDOW_HEIGHT - 150)
+        pygame.draw.rect(self.screen, COLOR_PANEL, content_rect, border_radius=8)
+        pygame.draw.rect(self.screen, COLOR_PRIMARY, content_rect, 2, border_radius=8)
+
+        # Instruction Text logic
+        lang = self.instr_lang
+        
+        sections = []
+        if lang == "EN":
+            sections = [
+                ("1. Basic Game Rules", [
+                    "Connect 4 3D is a spatial strategy game played on a 5x5x8 grid.",
+                    "Goal: Form a line of 4 pieces of your color vertically, horizontally, or diagonally.",
+                    "Gravity: Pieces must be placed on the bottom layer or on top of an existing piece.",
+                    "Players take turns placing one piece at a time."
+                ]),
+                ("2. Game Page Buttons", [
+                    "Toggle 3D View: Switch between 2D layered view and rotatable 3D perspective.",
+                    "Get Hint: Ask the AI for the suggested best move.",
+                    "Undo: Revert previous moves. In PvE, it reverts both player and AI steps.",
+                    "Restart: Clear the board and start a fresh game.",
+                    "Win Prediction: Real-time analysis of winning probabilities for both sides.",
+                    "Coord Input (L R C): Manually enter coordinates (Layer, Row, Col) in 3D view."
+                ]),
+                ("3. AI Model Introduction", [
+                    "v1.2_low: A child model with little knowledge of the game. You can easily win against him.",
+                    "v1.2_middle: A child model with some knowledge of the game. Pay attention and you can win!",
+                    "v1.2_high: A child model with the ability to play. Fundamental game knowledge is required to win."
+                ]),
+                ("4. Useful Tips", [
+                    "Generally, prioritize controlling the center area of the first layer, and also watch for opportunities to complete lines on the first layer.",
+                    "Horizontally, if the opponent can form two in a row, you may need to defend, similar to the 'open three' concept in Gomoku.",
+                    "From experience, starting with a 'pillar' is not a good choice.",
+                    "You can use the tactic of forming two or three in a row to force both players to follow your pace, which can reduce the amount of thinking to some extent. However, be aware that this also provides opportunities for both sides."
+                ])
+            ]
+        else:
+            sections = [
+                ("1. 基本规则", [
+                    "立体四字棋是一款在 5x5x8 网格中进行的立体空间博弈游戏。",
+                    "获胜目标：在水平、垂直或空间对角线等任意方向上形成连续的 4 个同色棋子。",
+                    "重力：棋子必须落到底层，或叠放在已有棋子之上。",
+                    "玩家轮流落子，每回合仅限一颗。"
+                ]),
+                ("2. 游戏功能按钮", [
+                    "切换 3D 视图：在传统的 2D 分层布局与可自由旋转的 3D 视角间切换。",
+                    "获取提示 (Hint)：让选用的 AI 为你推荐当前落子点。",
+                    "撤销 (Undo)：回滚操作。在人机对战中，会同时撤销你和 AI 的最后一步。",
+                    "重置 (Restart)：清空棋盘，重新开始对局。",
+                    "胜率预测 (Prediction)：实时显示 AI 对当前局面双方胜出概率的预判。",
+                    "坐标输入 (L R C)：在 3D 模式下，直接输入层、行、列数值进行落子。"
+                ]),
+                ("3. AI 模型介绍", [
+                    "v1.2_low：对游戏规则仅有初级了解的模型，你可能可以轻松击败它。",
+                    "v1.2_middle：具备一定的实战经验。保持专注，你便能取胜！",
+                    "v1.2_high：具备一定的棋力，需要一定的基本功才能赢得比赛。"
+                ]),
+                ("4. 快速入门", [
+                    "一般而言，需要优先完成第一层中心区域的布置，也要优先注意是否会在第一层完成连线。",
+                    "在水平方向上，如果对方能够连成两个子，可能就意味着你需要进行防守，这和五子棋中拥有“活三”的效果是一样的。",
+                    "就已有经验而言，开局“擎天柱”不是一个好选择。",
+                    "你可以用冲连子的方法先连成二或连成三，迫使双方先按你的步调落子，一定程度上会减少思考量。但是需注意，这会给双方提供机会。"
+                ])
+            ]
+
+        # Draw sections
+        margin_x = content_rect.x + 30
+        
+        # Adjust for Chinese fonts
+        if lang == "CN":
+            font_sub = pygame.font.SysFont("Microsoft YaHei", 22, bold=True)
+            font_text = pygame.font.SysFont("Microsoft YaHei", 18)
+        else:
+            font_sub = pygame.font.SysFont("Consolas", 22, bold=True)
+            font_text = pygame.font.SysFont("Consolas", 18)
+
+        # Content area with clipping
+        inner_rect = content_rect.inflate(-40, -40)
+        old_clip = self.screen.get_clip()
+        self.screen.set_clip(inner_rect)
+        
+        curr_y = inner_rect.y + self.instr_scroll_y
+        wrap_width = inner_rect.width - 60
+
+        for title, lines in sections:
+            # Draw Title
+            t_col = COLOR_ACCENT
+            t_s = font_sub.render(title, True, t_col)
+            if curr_y + t_s.get_height() > inner_rect.y and curr_y < inner_rect.bottom:
+                self.screen.blit(t_s, (margin_x, curr_y))
+            curr_y += 35
+            
+            for line in lines:
+                # Automatic Wrap
+                full_line = "• " + line
+                wrapped_lines = []
+                current_line = ""
+                for char in full_line:
+                    test_line = current_line + char
+                    if font_text.size(test_line)[0] < wrap_width:
+                        current_line = test_line
+                    else:
+                        wrapped_lines.append(current_line)
+                        current_line = "  " + char # Indentation for wrapped lines
+                if current_line:
+                    wrapped_lines.append(current_line)
+                
+                for wl in wrapped_lines:
+                    l_s = font_text.render(wl, True, COLOR_TEXT)
+                    if curr_y + l_s.get_height() > inner_rect.y and curr_y < inner_rect.bottom:
+                        self.screen.blit(l_s, (margin_x + 20, curr_y))
+                    curr_y += 28
+            curr_y += 15
+
+        # Update scroll limit
+        total_height = curr_y - (inner_rect.y + self.instr_scroll_y)
+        max_scroll = max(0, total_height - inner_rect.height)
+        if self.instr_scroll_y < -max_scroll:
+            self.instr_scroll_y = -max_scroll
+
+        self.screen.set_clip(old_clip)
+
+        # Draw Scrollbar
+        if max_scroll > 0:
+            scroll_bar_w = 4
+            scroll_bar_h = inner_rect.height * (inner_rect.height / total_height)
+            scroll_bar_y = inner_rect.y + (-self.instr_scroll_y / max_scroll) * (inner_rect.height - scroll_bar_h)
+            pygame.draw.rect(self.screen, COLOR_SECONDARY, (content_rect.right - 15, scroll_bar_y, scroll_bar_w, scroll_bar_h), border_radius=2)
+
+        self.btn_instr_back.draw(self.screen)
+        self.btn_instr_lang.draw(self.screen)
+
     def draw_game(self):
+        # Update view button text
+        self.btn_view.text = "Switch to 2D View" if self.view_3d_active else "Switch to 3D View"
+
         # Draw UI Panel background
         pygame.draw.rect(self.screen, COLOR_PANEL, (WINDOW_WIDTH - 250, 0, 250, WINDOW_HEIGHT))
         
@@ -467,13 +702,25 @@ class Connect43DApp:
         
         # Draw Info Text
         p_text = f"Turn: {'RED' if self.gm.current_player == 1 else 'BLUE'}"
+        if self.ai_thinking or self.gm.hint_thinking:
+            p_text += " (A moment, AI is thinking...)"
+        
         p_col = COLOR_P1 if self.gm.current_player == 1 else COLOR_P2
         if self.gm.game_over:
             p_text = f"Winner: {'RED' if self.gm.winner == 1 else 'BLUE'}"
             if self.gm.winner == 0: p_text = "DRAW"
         
         info_surf = self.font_title.render(p_text, True, p_col)
+        # If it's too long, use a smaller font or wrap
+        if info_surf.get_width() > WINDOW_WIDTH - 280:
+             info_surf = self.font_curr.render(p_text, True, p_col)
+
         self.screen.blit(info_surf, (20, WINDOW_HEIGHT - 60))
+
+        # 显示总步数
+        step_text = f"Total Steps: {len(self.gm.history)}"
+        step_surf = self.font_curr.render(step_text, True, COLOR_TEXT_DIM)
+        self.screen.blit(step_surf, (20, WINDOW_HEIGHT - 90))
 
     def draw_board_2d(self):
         # Same logic as original but cleaner
@@ -502,18 +749,38 @@ class Connect43DApp:
                     
                     val = self.gm.board[l, r, c]
                     col = COLOR_GRID
-                    if val == 1: col = COLOR_P1
-                    elif val == 2: col = COLOR_P2
+                    is_ghost = False
                     
-                    # Highlight winning
-                    if (l,r,c) in self.gm.winning_line:
-                        pygame.draw.rect(self.screen, (255, 215, 0), (x-2, y-2, CELL+4, CELL+4), 3)
-                        
-                    # Hint
-                    if self.gm.hint_pos == (l,r,c) and (self.flash_timer % 30 < 15):
-                        pygame.draw.rect(self.screen, COLOR_HINT, (x, y, CELL, CELL), 3)
-
+                    if val == 1: 
+                        col = COLOR_P1
+                    elif val == 2: 
+                        col = COLOR_P2
+                    elif self.is_human_turn() and self.hovered_pos == (l, r, c) and self.gm.is_valid_move(l, r, c):
+                        # Ghost piece
+                        cp = self.gm.current_player
+                        base_col = COLOR_P1 if cp == 1 else COLOR_P2
+                        # Fade it: (base_col + 2*background)/3 approx
+                        col = tuple(int((base_col[i] + COLOR_BG[i] * 2) // 3) for i in range(3))
+                        is_ghost = True
+                    
+                    # Draw base cell first
                     pygame.draw.rect(self.screen, col, (x, y, CELL, CELL), border_radius=4)
+
+                    # Highlight winning (Gold)
+                    if (l,r,c) in self.gm.winning_line:
+                        pygame.draw.rect(self.screen, (255, 215, 0), (x-2, y-2, CELL+4, CELL+4), 3, border_radius=4)
+                        
+                    # Last Move Highlight (White outline)
+                    if self.gm.history and self.gm.history[-1][:3] == (l, r, c):
+                        pygame.draw.rect(self.screen, (255, 255, 255), (x-1, y-1, CELL+2, CELL+2), 2, border_radius=4)
+
+                    # Hint (Flashing Yellow) - Draw this LAST to ensure visibility
+                    if self.gm.hint_pos == (l,r,c) and (self.flash_timer % 30 < 15):
+                        pygame.draw.rect(self.screen, COLOR_HINT, (x, y, CELL, CELL), 4, border_radius=4)
+
+                    if is_ghost:
+                         # Extra indicator for ghost
+                         pygame.draw.rect(self.screen, (200, 200, 200), (x, y, CELL, CELL), 1, border_radius=4)
 
 
     def draw_board_3d(self):
@@ -588,9 +855,33 @@ class Connect43DApp:
         
         # Draw Labels
         font = self.font_curr
-        self.screen.blit(font.render("L", True, (0, 255, 0)), (l_end[0], l_end[1]))
-        self.screen.blit(font.render("R", True, (100, 100, 255)), (r_end[0], r_end[1]))
-        self.screen.blit(font.render("C", True, (255, 100, 100)), (c_end[0], c_end[1]))
+        font_small = self.font_small
+        
+        self.screen.blit(font.render("L (Layer)", True, (0, 255, 0)), (l_end[0], l_end[1]))
+        self.screen.blit(font.render("R (Row)", True, (100, 100, 255)), (r_end[0], r_end[1]))
+        self.screen.blit(font.render("C (Col)", True, (255, 100, 100)), (c_end[0], c_end[1]))
+
+        # Add coordinate ticks/labels
+        # L axis (0-7 -> 1-8)
+        for i in range(MAX_LAYERS):
+            pt = project_point(float(i), -0.5, -0.5)
+            pygame.draw.circle(self.screen, (0, 255, 0), (int(pt[0]), int(pt[1])), 2)
+            lbl = font_small.render(str(i+1), True, (0, 255, 0))
+            self.screen.blit(lbl, (pt[0] - 15, pt[1] - 7))
+
+        # R axis (0-4 -> 1-5)
+        for i in range(BOARD_SIZE):
+            pt = project_point(-0.5, float(i), -0.5)
+            pygame.draw.circle(self.screen, (100, 100, 255), (int(pt[0]), int(pt[1])), 2)
+            lbl = font_small.render(str(i+1), True, (100, 100, 255))
+            self.screen.blit(lbl, (pt[0] - 7, pt[1] + 5))
+
+        # C axis (0-4 -> 1-5)
+        for i in range(BOARD_SIZE):
+            pt = project_point(-0.5, -0.5, float(i))
+            pygame.draw.circle(self.screen, (255, 100, 100), (int(pt[0]), int(pt[1])), 2)
+            lbl = font_small.render(str(i+1), True, (255, 100, 100))
+            self.screen.blit(lbl, (pt[0] + 5, pt[1] - 7))
         
         # Draw Wireframe Box (lightly)
         corners = [
@@ -622,6 +913,8 @@ class Connect43DApp:
                         px, py, depth = project_point(l, r, c)
                         
                         col = COLOR_GRID
+                        is_last = (self.gm.history and self.gm.history[-1][:3] == (l, r, c))
+                        
                         if val == 1: col = COLOR_P1
                         elif val == 2: col = COLOR_P2
                         
@@ -631,22 +924,24 @@ class Connect43DApp:
                             else: continue # Don't draw
                         
                         # Store for sorting
-                        cubes.append({'z': depth, 'pos': (px, py), 'color': col, 'val': val})
+                        cubes.append({'z': depth, 'pos': (px, py), 'color': col, 'val': val, 'is_last': is_last, 'is_hint': is_hint})
         
-        # Sort by depth (farthest first). Large positive Z is close or far? 
-        # Z goes into screen in standard RHS if Y is up... 
-        # Actually just sort descending Z usually works if Z is "into screen". 
-        # If Z is "towards viewer", sort ascending.
-        # Let's try sorting descending z first.
+        # Sort by depth (farthest first)
         cubes.sort(key=lambda k: k['z'], reverse=False) 
         
         # Draw
         for cube in cubes:
             x, y = cube['pos']
-            s = scale // 1.2 # slightly smaller than grid
+            s = scale // 1.2
             pygame.draw.rect(self.screen, cube['color'], (x - s//2, y - s//2, s, s))
-            # Add simple shading/outline
-            pygame.draw.rect(self.screen, (255,255,255), (x - s//2, y - s//2, s, s), 1)
+            
+            # Simple shading/outline
+            if cube['is_last']:
+                pygame.draw.rect(self.screen, (255, 255, 255), (x - s//2 - 2, y - s//2 - 2, s + 4, s + 4), 2)
+            elif cube['is_hint']:
+                pygame.draw.rect(self.screen, (255, 255, 255), (x - s//2, y - s//2, s, s), 2)
+            else:
+                pygame.draw.rect(self.screen, (255,255,255), (x - s//2, y - s//2, s, s), 1)
             
             # Letter for layer?
             # if cube['val'] != 0:

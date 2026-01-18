@@ -113,7 +113,13 @@ class InputBox(UIElement):
 
     def get_values(self):
         try:
-            parts = self.text.strip().split()
+            raw = self.text.strip()
+            # If no spaces and 3 characters, split into individual digits
+            if " " not in raw and len(raw) == 3:
+                parts = list(raw)
+            else:
+                parts = raw.split()
+            
             if len(parts) == 3:
                 return [int(p) for p in parts]
         except ValueError:
